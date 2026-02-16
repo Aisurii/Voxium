@@ -32,23 +32,7 @@ function hexToRgb(hex) {
 }
 
 function createVoiceState() {
-    return {
-        joinedRoomId: null,
-        localStream: null,
-        screenStream: null,
-        screenTrack: null,
-        screenSharing: false,
-        screenQuality: localStorage.getItem("voiceScreenQuality") || "1080",
-        screenFps: localStorage.getItem("voiceScreenFps") || "30",
-        peers: {},
-        screenSenders: {},
-        audioEls: {},
-        remoteStreams: {},
-        remoteScreenEls: {},
-        members: {},
-        muted: false,
-        deafened: false,
-    };
+    return window.VoxiumVoice.createVoiceState();
 }
 
 // ── State ──────────────────────────────────────────────
@@ -195,88 +179,38 @@ const voiceStatusText = $("#voice-status-text");
 const voiceMeterBars = $("#voice-meter-bars");
 const voiceMeterLabel = $("#voice-meter-label");
 
-let micMeterAudioCtx = null;
-let micMeterAnalyser = null;
-let micMeterSource = null;
-let micMeterData = null;
-let micMeterAnim = null;
+let voiceController = null;
 
 function getScreenQualityPreset(value) {
-    if (value === "720") return { width: 1280, height: 720 };
-    if (value === "1080") return { width: 1920, height: 1080 };
-    if (value === "1440") return { width: 2560, height: 1440 };
-    return null;
+    return voiceController.getScreenQualityPreset(value);
 }
 
 function getScreenCaptureConstraints() {
-    const qualityValue = state.voice.screenQuality || "auto";
-    const fpsValue = Number.parseInt(state.voice.screenFps || "30", 10);
-    const preset = getScreenQualityPreset(qualityValue);
-
-    const video = {
-        cursor: "always",
-    };
-
-    if (preset) {
-        video.width = { ideal: preset.width };
-        video.height = { ideal: preset.height };
-    }
-
-    if (Number.isFinite(fpsValue) && fpsValue > 0) {
-        video.frameRate = { ideal: fpsValue, max: fpsValue };
-    }
-
-    return { video, audio: false };
+    return voiceController.getScreenCaptureConstraints();
 }
 
 function getScreenTrackConstraints() {
-    const qualityValue = state.voice.screenQuality || "auto";
-    const fpsValue = Number.parseInt(state.voice.screenFps || "30", 10);
-    const preset = getScreenQualityPreset(qualityValue);
-
-    const constraints = {};
-    if (preset) {
-        constraints.width = { ideal: preset.width };
-        constraints.height = { ideal: preset.height };
-    }
-    if (Number.isFinite(fpsValue) && fpsValue > 0) {
-        constraints.frameRate = { ideal: fpsValue, max: fpsValue };
-    }
-    return constraints;
+    return voiceController.getScreenTrackConstraints();
 }
 
 async function applyScreenTrackConstraints(track) {
-    if (!track) return;
-    const constraints = getScreenTrackConstraints();
-    if (Object.keys(constraints).length === 0) return;
-    try {
-        await track.applyConstraints(constraints);
-    } catch (err) {
-        console.warn("Impossible d'appliquer exactement la qualité/FPS demandés", err);
-    }
+    return voiceController.applyScreenTrackConstraints(track);
 }
 
 function syncScreenShareSettingsUI() {
-    if (voiceScreenQualitySelect) {
-        voiceScreenQualitySelect.value = state.voice.screenQuality || "1080";
-    }
-    if (voiceScreenFpsSelect) {
-        voiceScreenFpsSelect.value = state.voice.screenFps || "30";
-    }
+    return voiceController.syncScreenShareSettingsUI();
 }
 
 function updateScreenShareSettingsFromUI() {
-    const quality = voiceScreenQualitySelect ? voiceScreenQualitySelect.value : (state.voice.screenQuality || "1080");
-    const fps = voiceScreenFpsSelect ? voiceScreenFpsSelect.value : (state.voice.screenFps || "30");
-    state.voice.screenQuality = quality;
-    state.voice.screenFps = fps;
-    localStorage.setItem("voiceScreenQuality", quality);
-    localStorage.setItem("voiceScreenFps", fps);
+    return voiceController.updateScreenShareSettingsFromUI();
+}
+
+function handleScreenSettingsChange() {
+    return voiceController.handleScreenSettingsChange();
 }
 
 function getScreenProfileLabel(quality, fps) {
-    const qualityLabel = quality === "auto" ? "Auto" : `${quality}p`;
-    return `${qualityLabel} • ${fps} FPS`;
+    return voiceController.getScreenProfileLabel(quality, fps);
 }
 
 // Settings
@@ -1030,717 +964,133 @@ function wsSend(payload) {
     state.ws.send(JSON.stringify(payload));
 }
 
+voiceController = window.VoxiumVoice.createVoiceController({
+    getState: () => state,
+    API,
+    WEBRTC_CONFIG,
+    wsSend,
+    escapeHtml,
+    hashString,
+    dom: {
+        joinVoiceBtn,
+        leaveVoiceBtn,
+        voiceMuteBtn,
+        voiceDeafenBtn,
+        voiceScreenBtn,
+        muteBtn,
+        deafenBtn,
+        voiceMeterBars,
+        voiceMeterLabel,
+        voiceQuickStatus,
+        voiceStatusText,
+        voiceRoomChip,
+        voiceRoomSubtitle,
+        voiceMembersList,
+        voiceScreensWrap,
+        voiceScreensGrid,
+        voiceScreenQualitySelect,
+        voiceScreenFpsSelect,
+    },
+});
+
 function updateVoiceButtons() {
-    const inVoice = !!state.voice.joinedRoomId;
-    joinVoiceBtn.classList.toggle("hidden", inVoice || state.currentRoomKind !== "voice");
-    leaveVoiceBtn.classList.toggle("hidden", !inVoice);
-    voiceMuteBtn.classList.toggle("hidden", !inVoice);
-    voiceDeafenBtn.classList.toggle("hidden", !inVoice);
-    voiceScreenBtn.classList.toggle("hidden", !inVoice);
-
-    const muteLabel = state.voice.muted ? "Réactiver micro" : "Muet";
-    const deafenLabel = state.voice.deafened ? "Réactiver casque" : "Sourdine";
-    const screenLabel = state.voice.screenSharing ? "Arrêter partage" : "Partager écran";
-    voiceMuteBtn.title = muteLabel;
-    voiceMuteBtn.setAttribute("aria-label", muteLabel);
-    voiceDeafenBtn.title = deafenLabel;
-    voiceDeafenBtn.setAttribute("aria-label", deafenLabel);
-    voiceScreenBtn.title = screenLabel;
-    voiceScreenBtn.setAttribute("aria-label", screenLabel);
-
-    voiceMuteBtn.classList.toggle("is-danger", state.voice.muted);
-    voiceDeafenBtn.classList.toggle("is-danger", state.voice.deafened);
-    voiceScreenBtn.classList.toggle("is-good", state.voice.screenSharing);
-
-    muteBtn.title = muteLabel;
-    deafenBtn.title = deafenLabel;
+    return voiceController.updateVoiceButtons();
 }
 
 function renderMicMeter(level) {
-    const bars = voiceMeterBars ? voiceMeterBars.querySelectorAll("span") : [];
-    const clamped = Math.max(0, Math.min(1, level));
-    const activeBars = Math.round(clamped * bars.length);
-    bars.forEach((bar, idx) => {
-        bar.classList.toggle("active", idx < activeBars);
-    });
-
-    if (!voiceMeterLabel) return;
-    if (!state.voice.joinedRoomId) {
-        voiceMeterLabel.textContent = "Micro inactif";
-    } else if (state.voice.muted || state.voice.deafened) {
-        voiceMeterLabel.textContent = "Micro coupé";
-    } else if (activeBars === 0) {
-        voiceMeterLabel.textContent = "Parle pour tester";
-    } else {
-        voiceMeterLabel.textContent = `Niveau micro ${Math.round(clamped * 100)}%`;
-    }
+    return voiceController.renderMicMeter(level);
 }
 
 function updateVoiceQuickStatus() {
-    if (!voiceQuickStatus || !voiceStatusText) return;
-
-    voiceQuickStatus.classList.remove("is-selected", "is-connected");
-    if (voiceRoomChip) {
-        voiceRoomChip.classList.remove("is-live", "is-selected");
-    }
-
-    if (state.voice.joinedRoomId) {
-        const room = state.rooms.find((r) => r.id === state.voice.joinedRoomId);
-        voiceQuickStatus.classList.add("is-connected");
-        voiceStatusText.textContent = `Connecté : ${room ? room.name : "salon vocal"}`;
-        if (voiceRoomChip) {
-            voiceRoomChip.textContent = "Connecté";
-            voiceRoomChip.classList.add("is-live");
-        }
-        if (voiceRoomSubtitle) {
-            voiceRoomSubtitle.textContent = `Discussion active dans ${room ? room.name : "ce salon"}.`;
-        }
-    } else if (state.currentRoomKind === "voice" && state.currentRoomName) {
-        voiceQuickStatus.classList.add("is-selected");
-        voiceStatusText.textContent = `Sélectionné : ${state.currentRoomName}`;
-        if (voiceRoomChip) {
-            voiceRoomChip.textContent = "Sélectionné";
-            voiceRoomChip.classList.add("is-selected");
-        }
-        if (voiceRoomSubtitle) {
-            voiceRoomSubtitle.textContent = "Rejoignez ce salon pour discuter en audio.";
-        }
-    } else {
-        voiceStatusText.textContent = "Pas connecté à un salon vocal";
-        if (voiceRoomChip) {
-            voiceRoomChip.textContent = "Non connecté";
-        }
-        if (voiceRoomSubtitle) {
-            voiceRoomSubtitle.textContent = "Sélectionnez un salon vocal pour commencer.";
-        }
-    }
-
-    renderMicMeter(0);
+    return voiceController.updateVoiceQuickStatus();
 }
 
 function stopMicMeter() {
-    if (micMeterAnim) {
-        cancelAnimationFrame(micMeterAnim);
-        micMeterAnim = null;
-    }
-    if (micMeterSource) {
-        micMeterSource.disconnect();
-        micMeterSource = null;
-    }
-    if (micMeterAnalyser) {
-        micMeterAnalyser.disconnect();
-        micMeterAnalyser = null;
-    }
-    if (micMeterAudioCtx) {
-        micMeterAudioCtx.close().catch(() => { });
-        micMeterAudioCtx = null;
-    }
-    micMeterData = null;
-    renderMicMeter(0);
+    return voiceController.stopMicMeter();
 }
 
 function startMicMeter(stream) {
-    stopMicMeter();
-
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtx || !stream) {
-        renderMicMeter(0);
-        return;
-    }
-
-    try {
-        micMeterAudioCtx = new AudioCtx();
-        micMeterAnalyser = micMeterAudioCtx.createAnalyser();
-        micMeterAnalyser.fftSize = 512;
-        micMeterAnalyser.smoothingTimeConstant = 0.82;
-        micMeterSource = micMeterAudioCtx.createMediaStreamSource(stream);
-        micMeterSource.connect(micMeterAnalyser);
-        micMeterData = new Uint8Array(micMeterAnalyser.fftSize);
-
-        const tick = () => {
-            if (!micMeterAnalyser || !micMeterData) return;
-
-            micMeterAnalyser.getByteTimeDomainData(micMeterData);
-            let sum = 0;
-            for (let i = 0; i < micMeterData.length; i++) {
-                const normalized = (micMeterData[i] - 128) / 128;
-                sum += normalized * normalized;
-            }
-            const rms = Math.sqrt(sum / micMeterData.length);
-            const scaled = Math.min(1, rms * 7.5);
-
-            if (state.voice.muted || state.voice.deafened || !state.voice.joinedRoomId) {
-                renderMicMeter(0);
-            } else {
-                renderMicMeter(scaled);
-            }
-
-            micMeterAnim = requestAnimationFrame(tick);
-        };
-
-        micMeterAnim = requestAnimationFrame(tick);
-    } catch (err) {
-        console.error("Mic meter init error", err);
-        renderMicMeter(0);
-    }
+    return voiceController.startMicMeter(stream);
 }
 
 function renderVoiceMembers() {
-    voiceMembersList.innerHTML = "";
-    const members = Object.values(state.voice.members);
-    if (members.length === 0) {
-        const li = document.createElement("li");
-        li.textContent = "Aucun membre connecté";
-        voiceMembersList.appendChild(li);
-        return;
-    }
-
-    members.sort((a, b) => a.username.localeCompare(b.username, "fr"));
-    members.forEach((member) => {
-        const li = document.createElement("li");
-        li.className = "voice-member-row";
-
-        const userMeta = state.users[member.user_id] || {};
-        const colorRaw = typeof userMeta.avatar_color === "number"
-            ? userMeta.avatar_color
-            : hashString(member.username || "u");
-        const colorIndex = ((colorRaw % 8) + 8) % 8;
-
-        const avatarHtml = userMeta.avatar_url
-            ? `<img src="${API}${userMeta.avatar_url}" style="width:100%;height:100%;border-radius:50%;object-fit:cover">`
-            : escapeHtml((member.username || "U")[0].toUpperCase());
-
-        const badges = [];
-        if (member.muted) badges.push('<span class="voice-badge is-danger">Muet</span>');
-        if (member.deafened) badges.push('<span class="voice-badge is-danger">Casque</span>');
-        if (member.screenSharing) badges.push('<span class="voice-badge is-good">Écran</span>');
-        if (badges.length === 0) badges.push('<span class="voice-badge">En ligne</span>');
-
-        li.innerHTML = `
-            <div class="voice-member-main">
-                <div class="voice-member-avatar avatar-bg-${colorIndex}">${avatarHtml}</div>
-                <span class="voice-member-name">${escapeHtml(member.username)}${member.user_id === state.userId ? " (vous)" : ""}</span>
-            </div>
-            <div class="voice-member-badges">${badges.join("")}</div>
-        `;
-        voiceMembersList.appendChild(li);
-    });
+    return voiceController.renderVoiceMembers();
 }
 
 function updateVoiceScreensVisibility() {
-    if (!voiceScreensWrap || !voiceScreensGrid) return;
-    voiceScreensWrap.classList.remove("hidden");
+    return voiceController.updateVoiceScreensVisibility();
 }
 
 function removeRemoteScreenTile(userId) {
-    if (!voiceScreensGrid) return;
-    const tile = state.voice.remoteScreenEls[userId];
-    if (tile) {
-        tile.remove();
-        delete state.voice.remoteScreenEls[userId];
-    }
-    updateVoiceScreensVisibility();
+    return voiceController.removeRemoteScreenTile(userId);
 }
 
 function syncRemoteScreenTile(userId, stream) {
-    if (!voiceScreensGrid) return;
-    const hasLiveVideo = !!stream && stream.getVideoTracks().some((track) => track.readyState === "live");
-    if (!hasLiveVideo) {
-        removeRemoteScreenTile(userId);
-        return;
-    }
-
-    let tile = state.voice.remoteScreenEls[userId];
-    if (!tile) {
-        tile = document.createElement("div");
-        tile.className = "voice-screen-tile";
-
-        const video = document.createElement("video");
-        video.className = "voice-screen-video";
-        video.autoplay = true;
-        video.playsInline = true;
-
-        const label = document.createElement("span");
-        label.className = "voice-screen-label";
-
-        const meta = document.createElement("span");
-        meta.className = "voice-screen-meta";
-
-        tile.appendChild(video);
-        tile.appendChild(label);
-        tile.appendChild(meta);
-        voiceScreensGrid.appendChild(tile);
-        state.voice.remoteScreenEls[userId] = tile;
-    }
-
-    tile.classList.toggle("is-self", userId === state.userId);
-
-    const video = tile.querySelector("video");
-    const label = tile.querySelector(".voice-screen-label");
-    const meta = tile.querySelector(".voice-screen-meta");
-    if (video && video.srcObject !== stream) {
-        video.srcObject = stream;
-    }
-    if (video) {
-        video.play().catch(() => {
-            // autoplay peut être bloqué sans interaction
-        });
-    }
-
-    const username = state.voice.members[userId]?.username || state.users[userId]?.username || "Utilisateur";
-    if (label) {
-        label.textContent = userId === state.userId
-            ? "Vous partagez votre écran"
-            : `${username} partage son écran`;
-    }
-
-    if (meta) {
-        if (userId === state.userId) {
-            meta.textContent = getScreenProfileLabel(state.voice.screenQuality || "auto", state.voice.screenFps || "30");
-            meta.classList.remove("hidden");
-        } else {
-            meta.textContent = "";
-            meta.classList.add("hidden");
-        }
-    }
-
-    updateVoiceScreensVisibility();
+    return voiceController.syncRemoteScreenTile(userId, stream);
 }
 
 function applyLocalTrackState() {
-    if (!state.voice.localStream) return;
-    const enabled = !state.voice.muted && !state.voice.deafened;
-    state.voice.localStream.getAudioTracks().forEach((track) => {
-        track.enabled = enabled;
-    });
+    return voiceController.applyLocalTrackState();
 }
 
 function ensureVoiceMember(userId, username) {
-    if (!state.voice.members[userId]) {
-        state.voice.members[userId] = {
-            user_id: userId,
-            username: username || state.users[userId]?.username || "Utilisateur",
-            muted: false,
-            deafened: false,
-            screenSharing: false,
-        };
-    }
+    return voiceController.ensureVoiceMember(userId, username);
 }
 
 function cleanupRemotePeer(userId) {
-    const peer = state.voice.peers[userId];
-    if (peer) {
-        peer.onicecandidate = null;
-        peer.ontrack = null;
-        peer.close();
-        delete state.voice.peers[userId];
-    }
-
-    const audioEl = state.voice.audioEls[userId];
-    if (audioEl) {
-        audioEl.srcObject = null;
-        audioEl.remove();
-        delete state.voice.audioEls[userId];
-    }
-
-    delete state.voice.remoteStreams[userId];
-    delete state.voice.screenSenders[userId];
-    removeRemoteScreenTile(userId);
+    return voiceController.cleanupRemotePeer(userId);
 }
 
 function resetVoiceConnections() {
-    Object.keys(state.voice.peers).forEach((userId) => cleanupRemotePeer(userId));
-    if (voiceScreensGrid) {
-        voiceScreensGrid.innerHTML = "";
-    }
-    state.voice.remoteScreenEls = {};
-    state.voice.remoteStreams = {};
-    state.voice.screenSenders = {};
-    updateVoiceScreensVisibility();
+    return voiceController.resetVoiceConnections();
 }
 
 function createPeerConnection(remoteUserId, shouldCreateOffer) {
-    if (state.voice.peers[remoteUserId]) {
-        return state.voice.peers[remoteUserId];
-    }
-
-    const peer = new RTCPeerConnection(WEBRTC_CONFIG);
-    state.voice.peers[remoteUserId] = peer;
-
-    if (state.voice.localStream) {
-        state.voice.localStream.getTracks().forEach((track) => {
-            peer.addTrack(track, state.voice.localStream);
-        });
-    }
-
-    if (state.voice.screenTrack && state.voice.screenStream) {
-        const screenSender = peer.addTrack(state.voice.screenTrack, state.voice.screenStream);
-        state.voice.screenSenders[remoteUserId] = screenSender;
-    }
-
-    peer.onicecandidate = (event) => {
-        if (!event.candidate) return;
-        wsSend({
-            type: "voice_signal",
-            room_id: state.voice.joinedRoomId,
-            user_id: state.userId,
-            target_user_id: remoteUserId,
-            candidate: event.candidate,
-        });
-    };
-
-    peer.ontrack = (event) => {
-        const remoteStream = event.streams[0];
-        if (!remoteStream) return;
-        state.voice.remoteStreams[remoteUserId] = remoteStream;
-
-        let audioEl = state.voice.audioEls[remoteUserId];
-        if (!audioEl) {
-            audioEl = document.createElement("audio");
-            audioEl.autoplay = true;
-            audioEl.playsInline = true;
-            document.body.appendChild(audioEl);
-            state.voice.audioEls[remoteUserId] = audioEl;
-        }
-        audioEl.srcObject = remoteStream;
-        audioEl.muted = state.voice.deafened;
-        audioEl.play().catch(() => {
-            // autoplay can be blocked until interaction
-        });
-
-        syncRemoteScreenTile(remoteUserId, remoteStream);
-        remoteStream.onremovetrack = () => {
-            syncRemoteScreenTile(remoteUserId, remoteStream);
-        };
-        remoteStream.getVideoTracks().forEach((track) => {
-            track.onended = () => {
-                syncRemoteScreenTile(remoteUserId, remoteStream);
-            };
-        });
-    };
-
-    if (shouldCreateOffer) {
-        peer.createOffer()
-            .then((offer) => peer.setLocalDescription(offer))
-            .then(() => {
-                wsSend({
-                    type: "voice_signal",
-                    room_id: state.voice.joinedRoomId,
-                    user_id: state.userId,
-                    target_user_id: remoteUserId,
-                    sdp: peer.localDescription,
-                });
-            })
-            .catch((err) => console.error("Failed to create offer", err));
-    }
-
-    return peer;
+    return voiceController.createPeerConnection(remoteUserId, shouldCreateOffer);
 }
 
 async function handleVoiceSignal(msg) {
-    if (msg.target_user_id !== state.userId) return;
-    if (!state.voice.joinedRoomId || msg.room_id !== state.voice.joinedRoomId) return;
-    if (!msg.user_id) return;
-
-    const remoteUserId = msg.user_id;
-    const peer = createPeerConnection(remoteUserId, false);
-
-    if (msg.sdp) {
-        await peer.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-        if (msg.sdp.type === "offer") {
-            const answer = await peer.createAnswer();
-            await peer.setLocalDescription(answer);
-            wsSend({
-                type: "voice_signal",
-                room_id: state.voice.joinedRoomId,
-                user_id: state.userId,
-                target_user_id: remoteUserId,
-                sdp: peer.localDescription,
-            });
-        }
-    } else if (msg.candidate) {
-        await peer.addIceCandidate(new RTCIceCandidate(msg.candidate));
-    }
+    return voiceController.handleVoiceSignal(msg);
 }
 
 async function renegotiatePeer(remoteUserId) {
-    const peer = state.voice.peers[remoteUserId];
-    if (!peer || !state.voice.joinedRoomId) return;
-
-    const offer = await peer.createOffer();
-    await peer.setLocalDescription(offer);
-    wsSend({
-        type: "voice_signal",
-        room_id: state.voice.joinedRoomId,
-        user_id: state.userId,
-        target_user_id: remoteUserId,
-        sdp: peer.localDescription,
-    });
+    return voiceController.renegotiatePeer(remoteUserId);
 }
 
 function broadcastVoiceState() {
-    if (!state.voice.joinedRoomId) return;
-    wsSend({
-        type: "voice_state",
-        room_id: state.voice.joinedRoomId,
-        user_id: state.userId,
-        username: state.username,
-        muted: state.voice.muted,
-        deafened: state.voice.deafened,
-        screen_sharing: state.voice.screenSharing,
-    });
+    return voiceController.broadcastVoiceState();
 }
 
 async function startScreenShare() {
-    if (!state.voice.joinedRoomId) return;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-        alert("Le partage d'écran n'est pas supporté sur cet appareil.");
-        return;
-    }
-    if (state.voice.screenTrack) return;
-
-    try {
-        updateScreenShareSettingsFromUI();
-        const displayStream = await navigator.mediaDevices.getDisplayMedia(getScreenCaptureConstraints());
-        const screenTrack = displayStream.getVideoTracks()[0];
-        if (!screenTrack) return;
-
-        await applyScreenTrackConstraints(screenTrack);
-
-        state.voice.screenStream = displayStream;
-        state.voice.screenTrack = screenTrack;
-        state.voice.screenSharing = true;
-
-        syncRemoteScreenTile(state.userId, displayStream);
-
-        screenTrack.onended = () => {
-            stopScreenShare(true).catch((err) => console.error("Screen stop error", err));
-        };
-
-        Object.entries(state.voice.peers).forEach(([remoteUserId, peer]) => {
-            const sender = peer.addTrack(screenTrack, displayStream);
-            state.voice.screenSenders[remoteUserId] = sender;
-        });
-
-        await Promise.all(
-            Object.keys(state.voice.peers).map((remoteUserId) =>
-                renegotiatePeer(remoteUserId).catch((err) => {
-                    console.error("Renegotiation error", err);
-                })
-            )
-        );
-
-        ensureVoiceMember(state.userId, state.username);
-        state.voice.members[state.userId].screenSharing = true;
-        renderVoiceMembers();
-        updateVoiceButtons();
-        broadcastVoiceState();
-    } catch (err) {
-        console.error(err);
-        alert("Impossible de démarrer le partage d'écran.");
-    }
+    return voiceController.startScreenShare();
 }
 
 async function stopScreenShare(shouldBroadcast = true, shouldRenegotiate = true) {
-    if (!state.voice.screenTrack && !state.voice.screenStream && !state.voice.screenSharing) return;
-
-    Object.entries(state.voice.peers).forEach(([remoteUserId, peer]) => {
-        const explicitSender = state.voice.screenSenders[remoteUserId];
-        const sender = explicitSender || peer.getSenders().find((s) => s.track && s.track.kind === "video");
-        if (sender) {
-            try {
-                peer.removeTrack(sender);
-            } catch (err) {
-                console.error("removeTrack error", err);
-            }
-        }
-        delete state.voice.screenSenders[remoteUserId];
-    });
-
-    if (state.voice.screenStream) {
-        state.voice.screenStream.getTracks().forEach((track) => track.stop());
-    } else if (state.voice.screenTrack) {
-        state.voice.screenTrack.stop();
-    }
-
-    state.voice.screenStream = null;
-    state.voice.screenTrack = null;
-    state.voice.screenSharing = false;
-    removeRemoteScreenTile(state.userId);
-
-    ensureVoiceMember(state.userId, state.username);
-    state.voice.members[state.userId].screenSharing = false;
-    renderVoiceMembers();
-    updateVoiceButtons();
-
-    if (shouldRenegotiate) {
-        await Promise.all(
-            Object.keys(state.voice.peers).map((remoteUserId) =>
-                renegotiatePeer(remoteUserId).catch((err) => {
-                    console.error("Renegotiation error", err);
-                })
-            )
-        );
-    }
-
-    if (shouldBroadcast) {
-        broadcastVoiceState();
-    }
+    return voiceController.stopScreenShare(shouldBroadcast, shouldRenegotiate);
 }
 
 function handleVoiceWsEvent(msg) {
-    if (!msg.room_id) return;
-
-    if (msg.type === "voice_join") {
-        if (!msg.user_id || !msg.username) return;
-        ensureVoiceMember(msg.user_id, msg.username);
-        state.voice.members[msg.user_id].muted = !!msg.muted;
-        state.voice.members[msg.user_id].deafened = !!msg.deafened;
-        state.voice.members[msg.user_id].screenSharing = !!msg.screen_sharing;
-        renderVoiceMembers();
-
-        if (
-            state.voice.joinedRoomId &&
-            state.voice.joinedRoomId === msg.room_id &&
-            msg.user_id !== state.userId
-        ) {
-            createPeerConnection(msg.user_id, true);
-        }
-        return;
-    }
-
-    if (msg.type === "voice_leave") {
-        if (!msg.user_id) return;
-        cleanupRemotePeer(msg.user_id);
-        delete state.voice.members[msg.user_id];
-        renderVoiceMembers();
-        return;
-    }
-
-    if (msg.type === "voice_state") {
-        if (!msg.user_id) return;
-        ensureVoiceMember(msg.user_id, msg.username);
-        state.voice.members[msg.user_id].muted = !!msg.muted;
-        state.voice.members[msg.user_id].deafened = !!msg.deafened;
-        state.voice.members[msg.user_id].screenSharing = !!msg.screen_sharing;
-        if (!msg.screen_sharing) {
-            removeRemoteScreenTile(msg.user_id);
-        } else if (state.voice.remoteStreams[msg.user_id]) {
-            syncRemoteScreenTile(msg.user_id, state.voice.remoteStreams[msg.user_id]);
-        }
-        renderVoiceMembers();
-        return;
-    }
-
-    if (msg.type === "voice_signal") {
-        handleVoiceSignal(msg).catch((err) => console.error("Voice signal error", err));
-    }
+    return voiceController.handleVoiceWsEvent(msg);
 }
 
 async function joinVoiceRoom() {
-    if (state.currentRoomKind !== "voice" || !state.currentRoomId) return;
-    if (state.voice.joinedRoomId === state.currentRoomId) return;
-
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        alert("Votre navigateur ne supporte pas l'audio WebRTC.");
-        return;
-    }
-
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        state.voice.localStream = stream;
-        state.voice.joinedRoomId = state.currentRoomId;
-        state.voice.members = {};
-        ensureVoiceMember(state.userId, state.username);
-        state.voice.members[state.userId].muted = state.voice.muted;
-        state.voice.members[state.userId].deafened = state.voice.deafened;
-        state.voice.members[state.userId].screenSharing = state.voice.screenSharing;
-
-        applyLocalTrackState();
-        startMicMeter(stream);
-        renderVoiceMembers();
-        updateVoiceButtons();
-        updateVoiceQuickStatus();
-
-        wsSend({
-            type: "voice_join",
-            room_id: state.currentRoomId,
-            user_id: state.userId,
-            username: state.username,
-            muted: state.voice.muted,
-            deafened: state.voice.deafened,
-            screen_sharing: state.voice.screenSharing,
-        });
-    } catch (err) {
-        alert("Impossible d'accéder au micro.");
-        console.error(err);
-    }
+    return voiceController.joinVoiceRoom();
 }
 
 function leaveVoiceRoom() {
-    if (!state.voice.joinedRoomId) return;
-
-    stopScreenShare(false, false).catch((err) => console.error("Screen stop error", err));
-
-    wsSend({
-        type: "voice_leave",
-        room_id: state.voice.joinedRoomId,
-        user_id: state.userId,
-        username: state.username,
-    });
-
-    resetVoiceConnections();
-    if (state.voice.localStream) {
-        state.voice.localStream.getTracks().forEach((track) => track.stop());
-    }
-    stopMicMeter();
-
-    state.voice.joinedRoomId = null;
-    state.voice.localStream = null;
-    state.voice.members = {};
-    renderVoiceMembers();
-    updateVoiceButtons();
-    updateVoiceQuickStatus();
+    return voiceController.leaveVoiceRoom();
 }
 
 function toggleVoiceMute() {
-    if (!state.voice.joinedRoomId) return;
-    state.voice.muted = !state.voice.muted;
-    applyLocalTrackState();
-    ensureVoiceMember(state.userId, state.username);
-    state.voice.members[state.userId].muted = state.voice.muted;
-    renderVoiceMembers();
-    updateVoiceButtons();
-    updateVoiceQuickStatus();
-
-    broadcastVoiceState();
+    return voiceController.toggleVoiceMute();
 }
 
 function toggleVoiceDeafen() {
-    if (!state.voice.joinedRoomId) return;
-    state.voice.deafened = !state.voice.deafened;
-    applyLocalTrackState();
-
-    Object.values(state.voice.audioEls).forEach((audioEl) => {
-        audioEl.muted = state.voice.deafened;
-    });
-
-    ensureVoiceMember(state.userId, state.username);
-    state.voice.members[state.userId].deafened = state.voice.deafened;
-    renderVoiceMembers();
-    updateVoiceButtons();
-    updateVoiceQuickStatus();
-
-    broadcastVoiceState();
+    return voiceController.toggleVoiceDeafen();
 }
 
 function toggleVoiceScreenShare() {
-    if (!state.voice.joinedRoomId) return;
-    if (state.voice.screenSharing) {
-        stopScreenShare(true).catch((err) => console.error("Screen stop error", err));
-    } else {
-        startScreenShare().catch((err) => console.error("Screen start error", err));
-    }
+    return voiceController.toggleVoiceScreenShare();
 }
 
 function renderMembers() {
@@ -2355,25 +1705,13 @@ voiceScreenBtn.addEventListener("click", () => {
 
 if (voiceScreenQualitySelect) {
     voiceScreenQualitySelect.addEventListener("change", () => {
-        updateScreenShareSettingsFromUI();
-        if (state.voice.screenSharing && state.voice.screenStream) {
-            syncRemoteScreenTile(state.userId, state.voice.screenStream);
-        }
-        if (state.voice.screenSharing && state.voice.screenTrack) {
-            applyScreenTrackConstraints(state.voice.screenTrack);
-        }
+        handleScreenSettingsChange();
     });
 }
 
 if (voiceScreenFpsSelect) {
     voiceScreenFpsSelect.addEventListener("change", () => {
-        updateScreenShareSettingsFromUI();
-        if (state.voice.screenSharing && state.voice.screenStream) {
-            syncRemoteScreenTile(state.userId, state.voice.screenStream);
-        }
-        if (state.voice.screenSharing && state.voice.screenTrack) {
-            applyScreenTrackConstraints(state.voice.screenTrack);
-        }
+        handleScreenSettingsChange();
     });
 }
 
