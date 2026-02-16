@@ -3,7 +3,7 @@ use actix_ws::Message;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -42,6 +42,14 @@ pub type Broadcaster = Arc<broadcast::Sender<String>>;
 /// Shared state for online users: user_id -> username
 pub type OnlineUsers = Arc<Mutex<HashMap<String, i32>>>; // user_id -> avatar_color (simplified)
 
+#[derive(Default)]
+pub struct AccessCacheState {
+    pub user_roles: HashMap<String, String>,
+    pub room_required_roles: HashMap<String, String>,
+}
+
+pub type AccessCache = Arc<Mutex<AccessCacheState>>;
+
 pub fn create_broadcaster() -> Broadcaster {
     let (tx, _) = broadcast::channel::<String>(256);
     Arc::new(tx)
@@ -51,6 +59,118 @@ pub fn create_online_users() -> OnlineUsers {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+pub fn create_access_cache() -> AccessCache {
+    Arc::new(Mutex::new(AccessCacheState::default()))
+}
+
+pub fn cache_set_user_role(cache: &AccessCache, user_id: &str, role: &str) {
+    let mut guard = cache.lock().unwrap();
+    guard.user_roles.insert(user_id.to_string(), role.to_string());
+}
+
+pub fn cache_clear_user_roles(cache: &AccessCache) {
+    let mut guard = cache.lock().unwrap();
+    guard.user_roles.clear();
+}
+
+pub fn cache_set_room_required_role(cache: &AccessCache, room_id: &str, required_role: &str) {
+    let mut guard = cache.lock().unwrap();
+    guard
+        .room_required_roles
+        .insert(room_id.to_string(), required_role.to_string());
+}
+
+pub fn cache_remove_room(cache: &AccessCache, room_id: &str) {
+    let mut guard = cache.lock().unwrap();
+    guard.room_required_roles.remove(room_id);
+}
+
+async fn get_user_role_cached(pool: &SqlitePool, cache: &AccessCache, user_id: &str) -> Option<String> {
+    {
+        let guard = cache.lock().unwrap();
+        if let Some(role) = guard.user_roles.get(user_id) {
+            return Some(role.clone());
+        }
+    }
+
+    let role: Option<String> = sqlx::query_scalar("SELECT role FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+    if let Some(ref role_value) = role {
+        cache_set_user_role(cache, user_id, role_value);
+    }
+
+    role
+}
+
+async fn get_room_required_role_cached(pool: &SqlitePool, cache: &AccessCache, room_id: &str) -> Option<String> {
+    {
+        let guard = cache.lock().unwrap();
+        if let Some(required_role) = guard.room_required_roles.get(room_id) {
+            return Some(required_role.clone());
+        }
+    }
+
+    let required_role: Option<String> = sqlx::query_scalar("SELECT required_role FROM rooms WHERE id = ?")
+        .bind(room_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+    if let Some(ref role_value) = required_role {
+        cache_set_room_required_role(cache, room_id, role_value);
+    }
+
+    required_role
+}
+
+pub async fn can_user_access_room_cached(
+    pool: &SqlitePool,
+    cache: &AccessCache,
+    user_id: &str,
+    room_id: &str,
+) -> bool {
+    let room_required_role = get_room_required_role_cached(pool, cache, room_id).await;
+    let user_role = get_user_role_cached(pool, cache, user_id).await;
+
+    match (room_required_role.as_deref(), user_role.as_deref()) {
+        (Some("user"), Some(_)) => true,
+        (Some(_), Some("admin")) => true,
+        (Some(required), Some(user_r)) => required == user_r,
+        _ => false,
+    }
+}
+
+fn extract_room_id(payload: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+    value
+        .get("room_id")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+}
+
+async fn fetch_accessible_rooms(pool: &SqlitePool, role: &str) -> HashSet<String> {
+    let rows = if role == "admin" {
+        sqlx::query_scalar::<_, String>("SELECT id FROM rooms")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+    } else {
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM rooms WHERE required_role = 'user' OR required_role = ?"
+        )
+        .bind(role)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    rows.into_iter().collect()
+}
+
 /// GET /ws — WebSocket upgrade
 pub async fn ws_handler(
     req: HttpRequest,
@@ -58,25 +178,44 @@ pub async fn ws_handler(
     pool: web::Data<SqlitePool>,
     broadcaster: web::Data<Broadcaster>,
     online_users: web::Data<OnlineUsers>,
+    access_cache: web::Data<AccessCache>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let (response, session, mut msg_stream) = actix_ws::handle(&req, stream)?;
 
     let pool = pool.get_ref().clone();
     let tx = broadcaster.get_ref().clone();
     let users = online_users.get_ref().clone();
+    let access_cache = access_cache.get_ref().clone();
     let mut rx = tx.subscribe();
 
-    // Determine user from query param or just wait for "join" message? 
-    // For simplicity, we'll wait for a "join" message with user info, 
-    // or we could extract token from query string. 
-    // Let's assume the client sends an initial "join" message.
-    
+    // We'll wait for a "join" message to hydrate user context.
     let mut my_user_id: Option<String> = None;
+    let allowed_rooms: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let is_admin = Arc::new(Mutex::new(false));
 
     // Spawn task: forward broadcast messages to this client
     let mut send_session = session.clone();
+    let send_allowed_rooms = allowed_rooms.clone();
+    let send_is_admin = is_admin.clone();
     actix_web::rt::spawn(async move {
         while let Ok(text) = rx.recv().await {
+            let room_id = extract_room_id(&text);
+            if let Some(rid) = room_id {
+                let allowed = {
+                    let admin = *send_is_admin.lock().unwrap();
+                    if admin {
+                        true
+                    } else {
+                        let guard = send_allowed_rooms.lock().unwrap();
+                        guard.contains(&rid)
+                    }
+                };
+
+                if !allowed {
+                    continue;
+                }
+            }
+
             if send_session.text(text).await.is_err() {
                 break;
             }
@@ -94,6 +233,20 @@ pub async fn ws_handler(
                         if ws_msg.msg_type == "join" {
                             if let (Some(uid), Some(_uname), Some(color)) = (&ws_msg.user_id, &ws_msg.username, ws_msg.avatar_color) {
                                 my_user_id = Some(uid.clone());
+
+                                let role = get_user_role_cached(&pool, &access_cache, uid)
+                                    .await
+                                    .unwrap_or_else(|| "user".to_string());
+                                let rooms = fetch_accessible_rooms(&pool, &role).await;
+                                {
+                                    let mut guard = allowed_rooms.lock().unwrap();
+                                    *guard = rooms;
+                                }
+                                {
+                                    let mut admin_guard = is_admin.lock().unwrap();
+                                    *admin_guard = role == "admin";
+                                }
+
                                 {
                                     let mut guard = users.lock().unwrap();
                                     guard.insert(uid.clone(), color);
@@ -128,27 +281,7 @@ pub async fn ws_handler(
                                 // Handle MESSAGE
                         else if ws_msg.msg_type == "message" {
                              if let (Some(content), Some(rid), Some(uid), Some(uname)) = (&ws_msg.content, &ws_msg.room_id, &ws_msg.user_id, &ws_msg.username) {
-                                let room_required_role: Option<String> = sqlx::query_scalar("SELECT required_role FROM rooms WHERE id = ?")
-                                    .bind(rid)
-                                    .fetch_optional(&pool)
-                                    .await
-                                    .unwrap_or(None);
-
-                                let user_role: Option<String> = sqlx::query_scalar("SELECT role FROM users WHERE id = ?")
-                                    .bind(uid)
-                                    .fetch_optional(&pool)
-                                    .await
-                                    .unwrap_or(None);
-
-                                let allowed = match (room_required_role.as_deref(), user_role.as_deref()) {
-                                    (Some("user"), Some(_)) => true,
-                                    (Some(required), Some("admin")) => {
-                                        let _ = required;
-                                        true
-                                    }
-                                    (Some(required), Some(user_r)) => required == user_r,
-                                    _ => false,
-                                };
+                                let allowed = can_user_access_room_cached(&pool, &access_cache, uid, rid).await;
 
                                 if !allowed {
                                     continue;

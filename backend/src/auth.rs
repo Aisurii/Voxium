@@ -440,6 +440,7 @@ pub async fn delete_server_role(
     req: HttpRequest,
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
+    access_cache: web::Data<crate::ws::AccessCache>,
 ) -> HttpResponse {
     let claims = match extract_claims(&req) {
         Some(c) => c,
@@ -459,6 +460,8 @@ pub async fn delete_server_role(
         .bind(&role_name)
         .execute(pool.get_ref())
         .await;
+
+    crate::ws::cache_clear_user_roles(access_cache.get_ref());
 
     let result = sqlx::query("DELETE FROM roles WHERE name = ?")
         .bind(&role_name)
@@ -518,6 +521,7 @@ pub async fn update_user_role(
     path: web::Path<String>,
     body: web::Json<UpdateRole>,
     broadcaster: web::Data<crate::ws::Broadcaster>,
+    access_cache: web::Data<crate::ws::AccessCache>,
 ) -> HttpResponse {
     let claims = match extract_claims(&req) {
         Some(c) => c,
@@ -564,6 +568,8 @@ pub async fn update_user_role(
                  let avatar_color: i32 = row.try_get("avatar_color").unwrap_or(0);
                  let avatar_url: Option<String> = row.try_get("avatar_url").unwrap_or(None);
                  let banner_url: Option<String> = row.try_get("banner_url").unwrap_or(None);
+
+                  crate::ws::cache_set_user_role(access_cache.get_ref(), &target_id, &role);
 
                  let event = serde_json::json!({
                      "type": "join", // handled as upsert by frontend

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 use crate::auth::extract_claims;
-use crate::ws::Broadcaster;
+use crate::ws::{cache_remove_room, cache_set_room_required_role, AccessCache, Broadcaster};
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Room {
@@ -58,6 +58,7 @@ pub async fn create_room(
     req: HttpRequest,
     pool: web::Data<SqlitePool>,
     body: web::Json<CreateRoom>,
+    access_cache: web::Data<AccessCache>,
 ) -> HttpResponse {
     let claims = match extract_claims(&req) {
         Some(c) => c,
@@ -101,7 +102,10 @@ pub async fn create_room(
         .await;
 
     match result {
-        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "id": id, "name": name, "kind": kind, "required_role": required_role })),
+        Ok(_) => {
+            cache_set_room_required_role(access_cache.get_ref(), &id, &required_role);
+            HttpResponse::Ok().json(serde_json::json!({ "id": id, "name": name, "kind": kind, "required_role": required_role }))
+        }
         Err(_) => HttpResponse::Conflict().json(serde_json::json!({ "error": "Room name already exists" })),
     }
 }
@@ -113,6 +117,7 @@ pub async fn update_room(
     path: web::Path<String>,
     body: web::Json<UpdateRoomSettings>,
     broadcaster: web::Data<Broadcaster>,
+    access_cache: web::Data<AccessCache>,
 ) -> HttpResponse {
     let claims = match extract_claims(&req) {
         Some(c) => c,
@@ -160,6 +165,8 @@ pub async fn update_room(
                 return HttpResponse::NotFound().json(serde_json::json!({ "error": "Room not found" }));
             }
 
+            cache_set_room_required_role(access_cache.get_ref(), &room_id, &required_role);
+
             let event = serde_json::json!({
                 "type": "room_updated",
                 "room_id": room_id,
@@ -181,6 +188,7 @@ pub async fn delete_room(
     pool: web::Data<SqlitePool>,
     path: web::Path<String>,
     broadcaster: web::Data<Broadcaster>,
+    access_cache: web::Data<AccessCache>,
 ) -> HttpResponse {
     let claims = match extract_claims(&req) {
         Some(c) => c,
@@ -207,6 +215,8 @@ pub async fn delete_room(
     match result {
         Ok(res) => {
             if res.rows_affected() > 0 {
+                cache_remove_room(access_cache.get_ref(), &room_id);
+
                 // Broadcast room_deleted event
                 let msg = serde_json::json!({
                     "type": "room_deleted",

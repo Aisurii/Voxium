@@ -19,6 +19,7 @@ async fn main() -> std::io::Result<()> {
     let pool = db::init_db().await;
     let broadcaster = ws::create_broadcaster();
     let online_users = ws::create_online_users();
+    let access_cache = ws::create_access_cache();
 
     // Ensure uploads directory exists
     std::fs::create_dir_all("uploads").ok();
@@ -37,6 +38,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(broadcaster.clone()))
             .app_data(web::Data::new(online_users.clone()))
+            .app_data(web::Data::new(access_cache.clone()))
             .route("/api/health", web::get().to(|| async {
                 HttpResponse::Ok().json(serde_json::json!({ "status": "ok" }))
             }))

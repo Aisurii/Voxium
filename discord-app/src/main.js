@@ -619,6 +619,36 @@ function renderRooms() {
     });
 }
 
+let roomsRenderQueued = false;
+function scheduleRoomsRender() {
+    if (roomsRenderQueued) return;
+    roomsRenderQueued = true;
+    requestAnimationFrame(() => {
+        roomsRenderQueued = false;
+        renderRooms();
+    });
+}
+
+let membersRenderQueued = false;
+function scheduleMembersRender() {
+    if (membersRenderQueued) return;
+    membersRenderQueued = true;
+    requestAnimationFrame(() => {
+        membersRenderQueued = false;
+        renderMembers();
+    });
+}
+
+let voiceMembersRenderQueued = false;
+function scheduleVoiceMembersRender() {
+    if (voiceMembersRenderQueued) return;
+    voiceMembersRenderQueued = true;
+    requestAnimationFrame(() => {
+        voiceMembersRenderQueued = false;
+        renderVoiceMembers();
+    });
+}
+
 function updateRoomModeUI(roomKind, roomName) {
     if (roomKind === "voice") {
         roomKindIcon.textContent = "🔊";
@@ -672,11 +702,25 @@ async function selectRoom(room) {
     }
 }
 
+let loadMessagesVersion = 0;
+const MESSAGE_RENDER_CHUNK_SIZE = 40;
+
+function nextFrame() {
+    return new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
 async function loadMessages(roomId) {
+    const version = ++loadMessagesVersion;
+
     try {
         const res = await fetch(`${API}/api/rooms/${roomId}/messages`, {
             headers: { Authorization: `Bearer ${state.token}` }
         });
+
+        if (version !== loadMessagesVersion || state.currentRoomId !== roomId) {
+            return;
+        }
+
         if (!res.ok) {
             if (res.status === 403) {
                 messagesContainer.innerHTML = `
@@ -691,7 +735,13 @@ async function loadMessages(roomId) {
             }
             throw new Error("Failed to load messages");
         }
+
         const messages = await res.json();
+
+        if (version !== loadMessagesVersion || state.currentRoomId !== roomId) {
+            return;
+        }
+
         messagesContainer.innerHTML = "";
         state.messageMetaById = {};
         state.pinnedMessageIds = new Set();
@@ -707,27 +757,46 @@ async function loadMessages(roomId) {
         } else {
             let lastUsername = null;
             let lastDate = null;
-            messages.forEach((msg) => {
-                const msgDate = msg.created_at ? msg.created_at.split('T')[0] : null;
-                const dateChanged = lastDate && msgDate && msgDate !== lastDate;
+            let index = 0;
 
-                // Insert date separator when day changes
-                if (dateChanged) {
-                    const sep = document.createElement("div");
-                    sep.className = "date-separator";
-                    sep.innerHTML = `<span>${formatDateLabel(msgDate)}</span>`;
-                    messagesContainer.appendChild(sep);
+            while (index < messages.length) {
+                if (version !== loadMessagesVersion || state.currentRoomId !== roomId) {
+                    return;
                 }
 
-                const isFirstInGroup = lastUsername !== msg.username || dateChanged;
-                appendMessage(msg, isFirstInGroup);
-                if (msg.pinned_at) {
-                    state.pinnedMessageIds.add(msg.id);
+                const fragment = document.createDocumentFragment();
+                const end = Math.min(index + MESSAGE_RENDER_CHUNK_SIZE, messages.length);
+
+                for (; index < end; index += 1) {
+                    const msg = messages[index];
+                    const msgDate = msg.created_at ? msg.created_at.split('T')[0] : null;
+                    const dateChanged = lastDate && msgDate && msgDate !== lastDate;
+
+                    if (dateChanged) {
+                        const sep = document.createElement("div");
+                        sep.className = "date-separator";
+                        sep.innerHTML = `<span>${formatDateLabel(msgDate)}</span>`;
+                        fragment.appendChild(sep);
+                    }
+
+                    const isFirstInGroup = lastUsername !== msg.username || dateChanged;
+                    appendMessage(msg, isFirstInGroup, fragment);
+                    if (msg.pinned_at) {
+                        state.pinnedMessageIds.add(msg.id);
+                    }
+                    lastUsername = msg.username;
+                    lastDate = msgDate;
                 }
-                lastUsername = msg.username;
-                lastDate = msgDate;
-            });
+
+                messagesContainer.appendChild(fragment);
+                await nextFrame();
+            }
         }
+
+        if (version !== loadMessagesVersion || state.currentRoomId !== roomId) {
+            return;
+        }
+
         scrollToBottom();
     } catch (err) {
         console.error("Failed to load messages:", err);
@@ -794,20 +863,33 @@ function connectWebSocket() {
                     state.mentionByRoom[msg.room_id] = (state.mentionByRoom[msg.room_id] || 0) + 1;
                 }
                 updateGlobalMentionBadge();
-                renderRooms();
+                scheduleRoomsRender();
             }
             if (msg.type === "join") {
                 if (msg.user_id && msg.username) {
+                    const existing = state.users[msg.user_id];
+                    const nextStatus = normalizePresence(msg.status || "online");
+                    const changed = !existing
+                        || existing.username !== msg.username
+                        || (existing.avatar_color || 0) !== (msg.avatar_color || 0)
+                        || (existing.avatar_url || null) !== (msg.avatar_url || null)
+                        || (existing.banner_url || null) !== (msg.banner_url || null)
+                        || (existing.role || "user") !== (msg.role || "user")
+                        || (existing.about || null) !== (msg.about || null)
+                        || normalizePresence(existing.status || "online") !== nextStatus;
+
                     state.users[msg.user_id] = {
                         username: msg.username,
                         avatar_color: msg.avatar_color || 0,
                         avatar_url: msg.avatar_url || null,
                         banner_url: msg.banner_url || null,
-                        status: normalizePresence(msg.status || "online"),
+                        status: nextStatus,
                         role: msg.role || "user",
                         about: msg.about || null,
                     };
-                    renderMembers();
+                    if (changed) {
+                        scheduleMembersRender();
+                    }
 
                     // Update popout if open for this user
                     if (currentPopoutUserId === msg.user_id) {
@@ -817,8 +899,11 @@ function connectWebSocket() {
             }
             else if (msg.type === "presence") {
                 if (msg.user_id && state.users[msg.user_id]) {
-                    state.users[msg.user_id].status = normalizePresence(msg.status || "online");
-                    renderMembers();
+                    const nextStatus = normalizePresence(msg.status || "online");
+                    if (state.users[msg.user_id].status !== nextStatus) {
+                        state.users[msg.user_id].status = nextStatus;
+                        scheduleMembersRender();
+                    }
                     if (currentPopoutUserId === msg.user_id) {
                         renderUserPopoutContent(msg.user_id, state.users[msg.user_id]);
                     }
@@ -829,8 +914,8 @@ function connectWebSocket() {
                     delete state.users[msg.user_id];
                     cleanupRemotePeer(msg.user_id);
                     delete state.voice.members[msg.user_id];
-                    renderVoiceMembers();
-                    renderMembers();
+                    scheduleVoiceMembersRender();
+                    scheduleMembersRender();
                 }
             }
             else if (msg.type === "room_deleted") {
@@ -875,7 +960,7 @@ function connectWebSocket() {
                             }
                         }
 
-                        renderRooms();
+                        scheduleRoomsRender();
                     } else {
                         loadRooms();
                     }
@@ -1472,7 +1557,7 @@ function openThreadForMessage(messageId) {
     renderThreadPanel();
 }
 
-function appendMessage(msg, isFirstInGroup = true) {
+function appendMessage(msg, isFirstInGroup = true, parent = messagesContainer) {
     const div = document.createElement("div");
     div.classList.add("message");
     div.setAttribute("data-username", msg.username);
@@ -1696,7 +1781,7 @@ function appendMessage(msg, isFirstInGroup = true) {
         });
     }
 
-    messagesContainer.appendChild(div);
+    parent.appendChild(div);
 }
 
 // Expose for inline onclick

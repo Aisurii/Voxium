@@ -5,6 +5,11 @@ use std::path::Path;
 pub async fn init_db() -> SqlitePool {
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:voxium.db".into());
+    let max_connections = std::env::var("DB_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(16);
 
     // Create the DB file if it doesn't exist
     let db_path = database_url.trim_start_matches("sqlite:");
@@ -13,10 +18,26 @@ pub async fn init_db() -> SqlitePool {
     }
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(max_connections)
         .connect(&database_url)
         .await
         .expect("Failed to connect to SQLite");
+
+    let _ = sqlx::query("PRAGMA journal_mode=WAL")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("PRAGMA synchronous=NORMAL")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("PRAGMA temp_store=MEMORY")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("PRAGMA busy_timeout=5000")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("PRAGMA cache_size=-20000")
+        .execute(&pool)
+        .await;
 
     // Run migrations
     let migration_sql = include_str!("../../migrations/001_init.sql");
@@ -103,6 +124,14 @@ pub async fn init_db() -> SqlitePool {
 
     let migration_011 = include_str!("../../migrations/011_add_message_reactions.sql");
     for statement in migration_011.split(';') {
+        let trimmed = statement.trim();
+        if !trimmed.is_empty() {
+            sqlx::query(trimmed).execute(&pool).await.ok();
+        }
+    }
+
+    let migration_012 = include_str!("../../migrations/012_add_perf_indexes.sql");
+    for statement in migration_012.split(';') {
         let trimmed = statement.trim();
         if !trimmed.is_empty() {
             sqlx::query(trimmed).execute(&pool).await.ok();
