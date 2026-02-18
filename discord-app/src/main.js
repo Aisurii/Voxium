@@ -338,8 +338,9 @@ function updateGlobalMentionBadge() {
 
 // ── Auth Mode ──────────────────────────────────────────
 let authMode = "login";
+let discordOAuthBackendCache = null;
 
-function getDiscordOAuthConfig() {
+function getDiscordOAuthConfigFromRuntime() {
     return {
         authorizeBaseUrl: (RUNTIME_CONFIG.discordAuthorizeBaseUrl || "https://discord.com/oauth2/authorize").trim(),
         clientId: (RUNTIME_CONFIG.discordClientId || "").trim(),
@@ -350,8 +351,44 @@ function getDiscordOAuthConfig() {
     };
 }
 
-function buildDiscordAuthorizeUrl() {
-    const cfg = getDiscordOAuthConfig();
+async function resolveDiscordOAuthConfig() {
+    const runtimeCfg = getDiscordOAuthConfigFromRuntime();
+    if (runtimeCfg.clientId && runtimeCfg.redirectUri) {
+        return runtimeCfg;
+    }
+
+    if (discordOAuthBackendCache) {
+        return discordOAuthBackendCache;
+    }
+
+    try {
+        const response = await fetch(`${API}/api/auth/discord/config`);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            return null;
+        }
+
+        const backendCfg = {
+            authorizeBaseUrl: (data.authorize_base_url || runtimeCfg.authorizeBaseUrl || "https://discord.com/oauth2/authorize").trim(),
+            clientId: (data.client_id || "").trim(),
+            redirectUri: (data.redirect_uri || "").trim(),
+            scope: (data.scope || runtimeCfg.scope || "identify email guilds").trim(),
+            responseType: (data.response_type || runtimeCfg.responseType || "code").trim(),
+            prompt: (data.prompt || runtimeCfg.prompt || "consent").trim(),
+        };
+
+        if (!backendCfg.clientId || !backendCfg.redirectUri) {
+            return null;
+        }
+
+        discordOAuthBackendCache = backendCfg;
+        return backendCfg;
+    } catch (err) {
+        return null;
+    }
+}
+
+function buildDiscordAuthorizeUrl(cfg) {
     if (!cfg.clientId || !cfg.redirectUri) {
         return null;
     }
@@ -410,7 +447,7 @@ async function handleDiscordOAuthCallback() {
         return false;
     }
 
-    const cfg = getDiscordOAuthConfig();
+    const cfg = await resolveDiscordOAuthConfig();
     if (!cfg.redirectUri) {
         authError.textContent = "Configuration Discord manquante (discordRedirectUri).";
         cleanDiscordOAuthParams();
@@ -462,11 +499,12 @@ tabRegister.addEventListener("click", () => {
 });
 
 if (authDiscordBtn) {
-    authDiscordBtn.addEventListener("click", () => {
+    authDiscordBtn.addEventListener("click", async () => {
         authError.textContent = "";
-        const authorizeUrl = buildDiscordAuthorizeUrl();
+        const cfg = await resolveDiscordOAuthConfig();
+        const authorizeUrl = cfg ? buildDiscordAuthorizeUrl(cfg) : null;
         if (!authorizeUrl) {
-            authError.textContent = "Configuration Discord manquante (discordClientId / discordRedirectUri).";
+            authError.textContent = "Configuration Discord manquante (frontend ou backend).";
             return;
         }
         window.location.assign(authorizeUrl);
