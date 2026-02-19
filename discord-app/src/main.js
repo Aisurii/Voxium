@@ -1806,7 +1806,7 @@ function appendMessage(msg, isFirstInGroup = true, parent = messagesContainer) {
                 </svg>
             </button>` : ''}
             ${(state.role === "admin" || msg.username === state.username) ? `
-            <button class="msg-action-btn danger" title="Supprimer" onclick="deleteMessageFromBtn('${msg.id}')">
+            <button class="msg-action-btn danger" title="Supprimer" data-delete-msg="${escapeHtml(msg.id)}">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="3 6 5 6 21 6"></polyline>
                     <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
@@ -1818,7 +1818,7 @@ function appendMessage(msg, isFirstInGroup = true, parent = messagesContainer) {
     // Build image HTML if present
     const imageHtml = msg.image_url ? `
         <div class="message-image-wrapper">
-            <img class="message-image" src="${API}${msg.image_url}" alt="image" onclick="openLightbox('${API}${msg.image_url}')" />
+            <img class="message-image" src="${API}${msg.image_url}" alt="image" data-lightbox="${escapeHtml(API + msg.image_url)}" />
         </div>
     ` : '';
 
@@ -3783,7 +3783,7 @@ function discordMarkdown(text) {
     s = s.replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, "<em>$1</em>");
     s = s.replace(/__(.+?)__/g, "<u>$1</u>");
     s = s.replace(/~~(.+?)~~/g, "<s>$1</s>");
-    s = s.replace(/\|\|(.+?)\|\|/g, '<span class="dc-spoiler" onclick="this.classList.toggle(\'revealed\')">$1</span>');
+    s = s.replace(/\|\|(.+?)\|\|/g, '<span class="dc-spoiler" data-spoiler>$1</span>');
     s = s.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" class="dc-link">$1</a>');
     s = s.replace(/\n/g, "<br>");
     return s;
@@ -4690,7 +4690,7 @@ function renderDiscordMessage(m) {
     const attachmentsHtml = (m.attachments || []).map(a => {
         const url = a.proxy_url || a.url;
         if (a.content_type?.startsWith("image/")) {
-            return `<div class="dc-attachment-img"><img src="${url}" alt="${escapeHtml(a.filename)}" loading="lazy" onclick="openLightbox('${url}')" /></div>`;
+            return `<div class="dc-attachment-img"><img src="${url}" alt="${escapeHtml(a.filename)}" loading="lazy" data-lightbox="${escapeHtml(url)}" /></div>`;
         }
         if (a.content_type?.startsWith("video/")) {
             return `<div class="dc-attachment-video"><video controls preload="metadata" src="${url}" style="max-width:400px;max-height:300px;border-radius:8px;"></video></div>`;
@@ -4767,7 +4767,7 @@ function renderDiscordEmbed(e) {
     }
     if (e.image?.proxy_url || e.image?.url) {
         const imgUrl = e.image.proxy_url || e.image.url;
-        parts.push(`<div class="dc-embed-image"><img src="${imgUrl}" loading="lazy" onclick="openLightbox('${imgUrl}')" /></div>`);
+        parts.push(`<div class="dc-embed-image"><img src="${imgUrl}" loading="lazy" data-lightbox="${escapeHtml(imgUrl)}" /></div>`);
     }
     if (e.thumbnail?.proxy_url || e.thumbnail?.url) {
         const thumbUrl = e.thumbnail.proxy_url || e.thumbnail.url;
@@ -5047,10 +5047,34 @@ emojiSearch.addEventListener("input", () => {
 window.openLightbox = function (url) {
     const overlay = document.createElement("div");
     overlay.className = "image-lightbox";
-    overlay.innerHTML = `<img src="${url}" />`;
+    const img = document.createElement("img");
+    img.src = url;
+    overlay.appendChild(img);
     overlay.addEventListener("click", () => overlay.remove());
     document.body.appendChild(overlay);
 };
+
+// Delegated click handlers (avoids inline onclick — required for strict CSP)
+document.addEventListener("click", (e) => {
+    // Lightbox: open image in overlay
+    const lightboxTarget = e.target.closest("[data-lightbox]");
+    if (lightboxTarget) {
+        openLightbox(lightboxTarget.getAttribute("data-lightbox"));
+        return;
+    }
+    // Delete message button
+    const deleteTarget = e.target.closest("[data-delete-msg]");
+    if (deleteTarget) {
+        deleteMessageFromBtn(deleteTarget.getAttribute("data-delete-msg"));
+        return;
+    }
+    // Spoiler reveal toggle
+    const spoilerTarget = e.target.closest("[data-spoiler]");
+    if (spoilerTarget) {
+        spoilerTarget.classList.toggle("revealed");
+        return;
+    }
+});
 
 // Close lightbox on ESC
 document.addEventListener("keydown", (e) => {

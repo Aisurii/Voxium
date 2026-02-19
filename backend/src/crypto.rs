@@ -3,19 +3,18 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use rand::{rngs::OsRng, RngCore};
+use sha2::{Sha256, Digest};
 use std::env;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 pub fn get_key() -> [u8; 32] {
     let key_str = env::var("ENCRYPTION_KEY").expect("ENCRYPTION_KEY must be set");
-    
+
+    // Derive a proper 32-byte key using SHA-256 regardless of input format.
+    // This ensures full 256-bit keyspace even if ENCRYPTION_KEY is a passphrase.
+    let hash = Sha256::digest(key_str.as_bytes());
     let mut key = [0u8; 32];
-    // If key is hex, decode it, otherwise just bytes (naive)
-    // For simplicity here we take first 32 bytes or pad
-    let bytes = key_str.as_bytes();
-    for (i, b) in bytes.iter().enumerate().take(32) {
-        key[i] = *b;
-    }
+    key.copy_from_slice(&hash);
     key
 }
 

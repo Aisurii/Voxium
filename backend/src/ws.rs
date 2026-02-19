@@ -282,9 +282,24 @@ pub async fn ws_handler(
 
     // Spawn task: read messages from this client
     actix_web::rt::spawn(async move {
+        // Per-connection message rate limiter: max 10 messages per second
+        let mut msg_timestamps: std::collections::VecDeque<std::time::Instant> = std::collections::VecDeque::new();
+        let max_msgs_per_window: usize = 10;
+        let rate_window = std::time::Duration::from_secs(1);
+
         while let Some(Ok(msg)) = msg_stream.next().await {
             match msg {
                 Message::Text(text) => {
+                    // Rate limit: drop messages that exceed the threshold
+                    let now = std::time::Instant::now();
+                    while msg_timestamps.front().map_or(false, |t| now.duration_since(*t) > rate_window) {
+                        msg_timestamps.pop_front();
+                    }
+                    if msg_timestamps.len() >= max_msgs_per_window {
+                        continue; // silently drop — client is flooding
+                    }
+                    msg_timestamps.push_back(now);
+
                     if let Ok(mut ws_msg) = serde_json::from_str::<WsMessage>(&text) {
                         
                         // Handle JOIN - REFACTORED: 
