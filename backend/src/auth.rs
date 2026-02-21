@@ -450,21 +450,36 @@ pub async fn discord_proxy(
         None => return HttpResponse::Unauthorized().finish(),
     };
 
-    let path = body.path.trim();
-    if path.is_empty() || !path.starts_with('/') || path.starts_with("//") {
+    let raw_path = body.path.trim();
+    if raw_path.is_empty() || !raw_path.starts_with('/') || raw_path.starts_with("//") {
          return HttpResponse::BadRequest().json(serde_json::json!({
              "error": "Discord path invalide"
          }));
     }
 
-    // Whitelist allowed paths
-    let allowed_paths = ["/users/@me", "/users/@me/guilds"];
-    let is_allowed = allowed_paths.iter().any(|p| path.starts_with(p));
+    // Normalize: URL-decode and lowercase to prevent bypass via encoding or case tricks
+    let decoded_path = urlencoding::decode(raw_path).unwrap_or(std::borrow::Cow::Borrowed(raw_path));
+    let path = decoded_path.to_lowercase();
+
+    // Whitelist allowed path prefixes
+    let allowed_prefixes = ["/users/@me", "/guilds/", "/channels/"];
+    let is_allowed = allowed_prefixes.iter().any(|p| path.starts_with(p));
     if !is_allowed {
-        return HttpResponse::BadRequest().json(serde_json::json!({
+        return HttpResponse::Forbidden().json(serde_json::json!({
              "error": "Path not allowed"
         }));
     }
+
+    // Block sensitive Discord API endpoints even if they match a prefix
+    let blocked_keywords = ["billing", "payment", "delete", "disable", "prune", "connections"];
+    if blocked_keywords.iter().any(|b| path.contains(b)) {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+             "error": "Path not allowed"
+        }));
+    }
+
+    // Use the original path (not lowercased) for the actual Discord API call
+    let path = raw_path;
 
     let method = body
         .method
@@ -604,10 +619,13 @@ pub async fn update_profile(
         set_clauses.push("avatar_color = ?");
     }
     if let Some(password) = &body.password {
-        if password.len() >= 4 {
-            password_hash_val = Some(hash(password, DEFAULT_COST).expect("hash failed"));
-            set_clauses.push("password_hash = ?");
+        if password.len() < 8 {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Password must be at least 8 characters"
+            }));
         }
+        password_hash_val = Some(hash(password, DEFAULT_COST).expect("hash failed"));
+        set_clauses.push("password_hash = ?");
     }
     if body.avatar_url.is_some() {
         set_clauses.push("avatar_url = ?");
